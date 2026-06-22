@@ -1,5 +1,6 @@
-param(
+﻿param(
     [string]$OutputDir = "",
+    [string]$GccPath = "",
     [switch]$SkipInstall
 )
 
@@ -27,14 +28,9 @@ function Add-PathIfExists([string]$Path)
 
 function Use-CommonToolPaths
 {
-    Add-PathIfExists "C:\ProgramData\chocolatey\bin"
-    Add-PathIfExists "C:\tools\mingw64\bin"
     Add-PathIfExists "C:\ProgramData\mingw64\mingw64\bin"
-
-    if($env:ChocolateyInstall)
-    {
-        Add-PathIfExists (Join-Path $env:ChocolateyInstall "lib\mingw\tools\install\mingw64\bin")
-    }
+    Add-PathIfExists "C:\tools\mingw64\bin"
+    Add-PathIfExists "C:\ProgramData\chocolatey\bin"
 }
 
 function Require-Command([string]$Name)
@@ -52,13 +48,22 @@ function Ensure-MinGW64
 {
     Use-CommonToolPaths
 
-    $Gcc = Get-Command "gcc.exe" -ErrorAction SilentlyContinue
+    if(-not [string]::IsNullOrWhiteSpace($GccPath))
+    {
+        if(-not (Test-Path $GccPath)) { throw "GccPath does not exist: $GccPath" }
+        $Gcc = Get-Item $GccPath
+    }
+    else
+    {
+        $Gcc = Get-Command "gcc.exe" -ErrorAction SilentlyContinue
+    }
+
     if($null -eq $Gcc -and -not $SkipInstall)
     {
         $Choco = Get-Command "choco.exe" -ErrorAction SilentlyContinue
         if($null -eq $Choco)
         {
-            throw "gcc.exe is missing and Chocolatey is not available to install mingw."
+            throw "gcc.exe is missing. Install 64-bit MinGW-w64 or pass -GccPath."
         }
 
         & $Choco.Source install mingw -y --no-progress
@@ -68,7 +73,7 @@ function Ensure-MinGW64
         $Gcc = Get-Command "gcc.exe" -ErrorAction SilentlyContinue
     }
 
-    if($null -eq $Gcc) { throw "gcc.exe was not found after setup." }
+    if($null -eq $Gcc) { throw "gcc.exe was not found. Install MinGW-w64, put it on PATH, or pass -GccPath." }
 
     $DumpMachine = & $Gcc.Source -dumpmachine
     if($LASTEXITCODE -ne 0) { throw "gcc -dumpmachine failed." }
@@ -97,7 +102,7 @@ function Ensure-Zlib([string]$Directory)
     if($LASTEXITCODE -ne 0) { throw "Failed to download zlib." }
 }
 
-$GccPath = Ensure-MinGW64
+$Gcc = Ensure-MinGW64
 
 $BuildDir = Join-Path $RepoRoot "build"
 if(-not (Test-Path $BuildDir))
@@ -146,7 +151,7 @@ $CompileArgs = @(
     "-lm"
 )
 
-& $GccPath @CompileArgs
+& $Gcc @CompileArgs
 if($LASTEXITCODE -ne 0) { throw "libspng.dll build failed." }
 
 $Objdump = Get-Command "objdump.exe" -ErrorAction SilentlyContinue
