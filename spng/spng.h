@@ -475,6 +475,8 @@ SPNG_API int spng_get_row_info(spng_ctx *ctx, struct spng_row_info *row_info);
 
 /* Encode */
 SPNG_API int spng_encode_image(spng_ctx *ctx, const void *img, size_t len, int fmt, int flags);
+SPNG_API void *SPNG_CDECL enc(const void *pixels, uintptr_t width_or_size, uintptr_t height_or_out_size, int *out_size);
+SPNG_API void SPNG_CDECL enc_free(void *ptr);
 
 /* Progressive encode */
 SPNG_API int spng_encode_scanline(spng_ctx *ctx, const void *scanline, size_t len);

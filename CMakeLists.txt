@@ -29,7 +29,7 @@ endif()
 
 set(spng_TARGETS "")
 
-set(spng_SOURCES spng/spng.c)
+set(spng_SOURCES spng/spng.c spng/enc.c)
 
 if(SPNG_SHARED)
     add_library(spng SHARED ${spng_SOURCES})
