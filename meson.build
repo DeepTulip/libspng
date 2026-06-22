@@ -45,7 +45,7 @@ spng_deps = [ zlib_dep, m_dep ]
 
 spng_inc = include_directories('spng')
 
-spng_src = files('spng/spng.c')
+spng_src = files('spng/spng.c', 'spng/enc.c')
 
 spng_lib = library('spng',
     spng_src,

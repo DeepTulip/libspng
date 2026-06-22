@@ -4573,8 +4573,35 @@ static int encode_scanline(spng_ctx *ctx, const void *scanline, size_t len)
 
     if(len < scanline_width - 1) return SPNG_EINTERNAL;
 
+    if(ctx->fmt == SPNG_FMT_RGBA8)
+    {
+        size_t i;
+
+        if(scanline == ctx->scanline)
+        {
+            for(i=0; i < scanline_width - 1; i += 4)
+            {
+                unsigned char tmp = ctx->scanline[i];
+                ctx->scanline[i] = ctx->scanline[i + 2];
+                ctx->scanline[i + 2] = tmp;
+            }
+        }
+        else
+        {
+            const unsigned char *src = scanline;
+            unsigned char *dst = ctx->scanline;
+
+            for(i=0; i < scanline_width - 1; i += 4)
+            {
+                dst[i] = src[i + 2];
+                dst[i + 1] = src[i + 1];
+                dst[i + 2] = src[i];
+                dst[i + 3] = src[i + 3];
+            }
+        }
+    }
     /* encode_row() interlaces directly to ctx->scanline */
-    if(scanline != ctx->scanline) memcpy(ctx->scanline, scanline, scanline_width - 1);
+    else if(scanline != ctx->scanline) memcpy(ctx->scanline, scanline, scanline_width - 1);
 
     if(f.to_bigendian) u16_row_to_bigendian(ctx->scanline, scanline_width - 1);
     const int requires_previous = f.filter_choice & (SPNG_FILTER_CHOICE_UP | SPNG_FILTER_CHOICE_AVG | SPNG_FILTER_CHOICE_PAETH);
@@ -4740,11 +4767,17 @@ int spng_encode_image(spng_ctx *ctx, const void *img, size_t len, int fmt, int f
     if(!ctx->state) return SPNG_EBADSTATE;
     if(!ctx->encode_only) return SPNG_ECTXTYPE;
     if(!ctx->stored.ihdr) return SPNG_ENOIHDR;
-    if( !(fmt == SPNG_FMT_PNG || fmt == SPNG_FMT_RAW) ) return SPNG_EFMT;
+    if( !(fmt == SPNG_FMT_RGBA8 || fmt == SPNG_FMT_PNG || fmt == SPNG_FMT_RAW) ) return SPNG_EFMT;
 
     int ret = 0;
     const struct spng_ihdr *ihdr = &ctx->ihdr;
     struct encode_flags *encode_flags = &ctx->encode_flags;
+
+    if(fmt == SPNG_FMT_RGBA8 &&
+       !(ihdr->color_type == SPNG_COLOR_TYPE_TRUECOLOR_ALPHA && ihdr->bit_depth == 8))
+    {
+        return SPNG_EFMT;
+    }
 
     if(ihdr->color_type == SPNG_COLOR_TYPE_INDEXED && !ctx->stored.plte) return SPNG_ENOPLTE;
 
