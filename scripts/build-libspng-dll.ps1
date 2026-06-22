@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$OutputDir = "",
     [string]$GccPath = "",
     [switch]$SkipInstall
