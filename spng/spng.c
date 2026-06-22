@@ -171,7 +171,6 @@ struct encode_flags
     unsigned to_bigendian:   1;
     unsigned progressive:    1;
     unsigned finalize:       1;
-    unsigned bgra8:          1;
 
     enum spng_filter_choice filter_choice;
 };
@@ -1544,13 +1543,13 @@ no_opt:
 static int filter_scanline(unsigned char *filtered, unsigned char *current_scanline,
                            const unsigned char *prev_scanline, const unsigned char *scanline,
                            size_t scanline_width, unsigned bytes_per_pixel,
-                           const unsigned filter, const unsigned source_bgra8)
+                           const unsigned filter, const int fmt)
 {
     if(prev_scanline == NULL || scanline == NULL || scanline_width <= 1) return SPNG_EINTERNAL;
-    if(source_bgra8 && current_scanline == NULL) return SPNG_EINTERNAL;
+    if(fmt == SPNG_FMT_RGBA8 && current_scanline == NULL) return SPNG_EINTERNAL;
 
     if(filter > 4) return SPNG_EFILTER;
-    if(filter == 0 && !source_bgra8) return 0;
+    if(filter == 0 && fmt != SPNG_FMT_RGBA8) return 0;
 
     scanline_width--;
 
@@ -1560,7 +1559,7 @@ static int filter_scanline(unsigned char *filtered, unsigned char *current_scanl
         unsigned index = i;
         uint8_t x, a, b, c;
 
-        if(source_bgra8)
+        if(fmt == SPNG_FMT_RGBA8)
         {
             if((i & 3) == 0) index = i + 2;
             else if((i & 3) == 2) index = i - 2;
@@ -1568,7 +1567,7 @@ static int filter_scanline(unsigned char *filtered, unsigned char *current_scanl
 
         if(i >= bytes_per_pixel)
         {
-            a = source_bgra8 ? current_scanline[i - bytes_per_pixel] : scanline[i - bytes_per_pixel];
+            a = fmt == SPNG_FMT_RGBA8 ? current_scanline[i - bytes_per_pixel] : scanline[i - bytes_per_pixel];
             b = prev_scanline[i];
             c = prev_scanline[i - bytes_per_pixel];
         }
@@ -1580,7 +1579,7 @@ static int filter_scanline(unsigned char *filtered, unsigned char *current_scanl
         }
 
         x = scanline[index];
-        if(source_bgra8) current_scanline[i] = x;
+        if(fmt == SPNG_FMT_RGBA8) current_scanline[i] = x;
 
         switch(filter)
         {
@@ -1615,7 +1614,7 @@ static int filter_scanline(unsigned char *filtered, unsigned char *current_scanl
 
 static int32_t filter_sum(const unsigned char *prev_scanline, const unsigned char *scanline,
                           size_t size, unsigned bytes_per_pixel,
-                          const unsigned filter, const unsigned source_bgra8)
+                          const unsigned filter, const int fmt)
 {
     /* prevent potential over/underflow, bails out at a width of ~8M pixels for RGBA8 */
     if(size > (INT32_MAX / 128)) return INT32_MAX;
@@ -1629,7 +1628,7 @@ static int32_t filter_sum(const unsigned char *prev_scanline, const unsigned cha
         unsigned index = i;
         unsigned prev_index = i;
 
-        if(source_bgra8)
+        if(fmt == SPNG_FMT_RGBA8)
         {
             if((i & 3) == 0) index = i + 2;
             else if((i & 3) == 2) index = i - 2;
@@ -1645,7 +1644,7 @@ static int32_t filter_sum(const unsigned char *prev_scanline, const unsigned cha
 
         if(i >= bytes_per_pixel)
         {
-            a = scanline[source_bgra8 ? prev_index : i - bytes_per_pixel];
+            a = scanline[fmt == SPNG_FMT_RGBA8 ? prev_index : i - bytes_per_pixel];
             b = prev_scanline[i];
             c = prev_scanline[i - bytes_per_pixel];
         }
@@ -1695,7 +1694,7 @@ static int32_t filter_sum(const unsigned char *prev_scanline, const unsigned cha
 
 static unsigned get_best_filter(const unsigned char *prev_scanline, const unsigned char *scanline,
                                 size_t scanline_width, unsigned bytes_per_pixel,
-                                const int choices, const unsigned source_bgra8)
+                                const int choices, const int fmt)
 {
     if(!choices) return SPNG_FILTER_NONE;
 
@@ -1720,7 +1719,7 @@ static unsigned get_best_filter(const unsigned char *prev_scanline, const unsign
         flag = 1 << (i + 3);
 
         if(choices & flag) sum = filter_sum(prev_scanline, scanline, scanline_width,
-                                            bytes_per_pixel, i, source_bgra8);
+                                            bytes_per_pixel, i, fmt);
         else continue;
 
         filter_scores[i] = abs(sum);
@@ -4606,7 +4605,7 @@ static int encode_scanline(spng_ctx *ctx, const void *scanline, size_t len)
     if(len < scanline_width - 1) return SPNG_EINTERNAL;
 
     /* encode_row() interlaces directly to ctx->scanline */
-    if(!f.bgra8 && scanline != ctx->scanline) memcpy(ctx->scanline, scanline, scanline_width - 1);
+    if(ctx->fmt != SPNG_FMT_RGBA8 && scanline != ctx->scanline) memcpy(ctx->scanline, scanline, scanline_width - 1);
 
     if(f.to_bigendian) u16_row_to_bigendian(ctx->scanline, scanline_width - 1);
     const int requires_previous = f.filter_choice & (SPNG_FILTER_CHOICE_UP | SPNG_FILTER_CHOICE_AVG | SPNG_FILTER_CHOICE_PAETH);
@@ -4618,18 +4617,18 @@ static int encode_scanline(spng_ctx *ctx, const void *scanline, size_t len)
         memset(ctx->prev_scanline, 0, scanline_width);
     }
 
-    filter = get_best_filter(ctx->prev_scanline, f.bgra8 ? scanline : ctx->scanline,
-                             scanline_width, ctx->bytes_per_pixel, f.filter_choice, f.bgra8);
+    filter = get_best_filter(ctx->prev_scanline, ctx->fmt == SPNG_FMT_RGBA8 ? scanline : ctx->scanline,
+                             scanline_width, ctx->bytes_per_pixel, f.filter_choice, ctx->fmt);
 
-    if(!filter && !f.bgra8) filtered_scanline = ctx->scanline;
+    if(!filter && ctx->fmt != SPNG_FMT_RGBA8) filtered_scanline = ctx->scanline;
 
     filtered_scanline[-1] = filter;
 
-    if(f.bgra8 || filter)
+    if(ctx->fmt == SPNG_FMT_RGBA8 || filter)
     {
         ret = filter_scanline(filtered_scanline, ctx->scanline, ctx->prev_scanline,
-                              f.bgra8 ? scanline : ctx->scanline,
-                              scanline_width, ctx->bytes_per_pixel, filter, f.bgra8);
+                              ctx->fmt == SPNG_FMT_RGBA8 ? scanline : ctx->scanline,
+                              scanline_width, ctx->bytes_per_pixel, filter, ctx->fmt);
         if(ret) return encode_err(ctx, ret);
     }
 
@@ -4879,7 +4878,6 @@ int spng_encode_image(spng_ctx *ctx, const void *img, size_t len, int fmt, int f
     if(ihdr->interlace_method) encode_flags->interlace = 1;
 
     if(fmt & (SPNG_FMT_PNG | SPNG_FMT_RAW) ) encode_flags->same_layout = 1;
-    if(fmt == SPNG_FMT_RGBA8) encode_flags->bgra8 = 1;
 
     if(ihdr->bit_depth == 16 && fmt != SPNG_FMT_RAW) encode_flags->to_bigendian = 1;
 
