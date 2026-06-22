@@ -171,7 +171,6 @@ struct encode_flags
     unsigned to_bigendian:   1;
     unsigned progressive:    1;
     unsigned finalize:       1;
-    unsigned bgra8:          1;
 
     enum spng_filter_choice filter_choice;
 };
@@ -1541,34 +1540,27 @@ no_opt:
     return 0;
 }
 
+static const unsigned char spng__bgra8_to_rgba8[4] = { 2, 1, 0, 3 };
+
 static int filter_scanline(unsigned char *filtered, unsigned char *current_scanline,
                            const unsigned char *prev_scanline, const unsigned char *scanline,
-                           size_t scanline_width, unsigned bytes_per_pixel,
-                           const unsigned filter, const unsigned source_bgra8)
+                           size_t scanline_width, unsigned bytes_per_pixel, const unsigned filter)
 {
     if(prev_scanline == NULL || scanline == NULL || scanline_width <= 1) return SPNG_EINTERNAL;
-    if(source_bgra8 && current_scanline == NULL) return SPNG_EINTERNAL;
 
     if(filter > 4) return SPNG_EFILTER;
-    if(filter == 0 && !source_bgra8) return 0;
 
     scanline_width--;
 
     uint32_t i;
     for(i=0; i < scanline_width; i++)
     {
-        unsigned index = i;
+        unsigned index = (i & ~3U) + spng__bgra8_to_rgba8[i & 3];
         uint8_t x, a, b, c;
-
-        if(source_bgra8)
-        {
-            if((i & 3) == 0) index = i + 2;
-            else if((i & 3) == 2) index = i - 2;
-        }
 
         if(i >= bytes_per_pixel)
         {
-            a = source_bgra8 ? current_scanline[i - bytes_per_pixel] : scanline[i - bytes_per_pixel];
+            a = current_scanline[i - bytes_per_pixel];
             b = prev_scanline[i];
             c = prev_scanline[i - bytes_per_pixel];
         }
@@ -1580,7 +1572,7 @@ static int filter_scanline(unsigned char *filtered, unsigned char *current_scanl
         }
 
         x = scanline[index];
-        if(source_bgra8) current_scanline[i] = x;
+        current_scanline[i] = x;
 
         switch(filter)
         {
@@ -1614,8 +1606,7 @@ static int filter_scanline(unsigned char *filtered, unsigned char *current_scanl
 }
 
 static int32_t filter_sum(const unsigned char *prev_scanline, const unsigned char *scanline,
-                          size_t size, unsigned bytes_per_pixel,
-                          const unsigned filter, const unsigned source_bgra8)
+                          size_t size, unsigned bytes_per_pixel, const unsigned filter)
 {
     /* prevent potential over/underflow, bails out at a width of ~8M pixels for RGBA8 */
     if(size > (INT32_MAX / 128)) return INT32_MAX;
@@ -1626,26 +1617,12 @@ static int32_t filter_sum(const unsigned char *prev_scanline, const unsigned cha
 
     for(i=0; i < size; i++)
     {
-        unsigned index = i;
-        unsigned prev_index = i;
-
-        if(source_bgra8)
-        {
-            if((i & 3) == 0) index = i + 2;
-            else if((i & 3) == 2) index = i - 2;
-
-            if(i >= bytes_per_pixel)
-            {
-                prev_index = i - bytes_per_pixel;
-
-                if((prev_index & 3) == 0) prev_index += 2;
-                else if((prev_index & 3) == 2) prev_index -= 2;
-            }
-        }
+        unsigned index = (i & ~3U) + spng__bgra8_to_rgba8[i & 3];
+        unsigned prev_index = ((i - bytes_per_pixel) & ~3U) + spng__bgra8_to_rgba8[(i - bytes_per_pixel) & 3];
 
         if(i >= bytes_per_pixel)
         {
-            a = scanline[source_bgra8 ? prev_index : i - bytes_per_pixel];
+            a = scanline[prev_index];
             b = prev_scanline[i];
             c = prev_scanline[i - bytes_per_pixel];
         }
@@ -1694,8 +1671,7 @@ static int32_t filter_sum(const unsigned char *prev_scanline, const unsigned cha
 }
 
 static unsigned get_best_filter(const unsigned char *prev_scanline, const unsigned char *scanline,
-                                size_t scanline_width, unsigned bytes_per_pixel,
-                                const int choices, const unsigned source_bgra8)
+                                size_t scanline_width, unsigned bytes_per_pixel, const int choices)
 {
     if(!choices) return SPNG_FILTER_NONE;
 
@@ -1719,8 +1695,7 @@ static unsigned get_best_filter(const unsigned char *prev_scanline, const unsign
     {
         flag = 1 << (i + 3);
 
-        if(choices & flag) sum = filter_sum(prev_scanline, scanline, scanline_width,
-                                            bytes_per_pixel, i, source_bgra8);
+        if(choices & flag) sum = filter_sum(prev_scanline, scanline, scanline_width, bytes_per_pixel, i);
         else continue;
 
         filter_scores[i] = abs(sum);
@@ -4605,9 +4580,6 @@ static int encode_scanline(spng_ctx *ctx, const void *scanline, size_t len)
 
     if(len < scanline_width - 1) return SPNG_EINTERNAL;
 
-    /* encode_row() interlaces directly to ctx->scanline */
-    if(!f.bgra8 && scanline != ctx->scanline) memcpy(ctx->scanline, scanline, scanline_width - 1);
-
     if(f.to_bigendian) u16_row_to_bigendian(ctx->scanline, scanline_width - 1);
     const int requires_previous = f.filter_choice & (SPNG_FILTER_CHOICE_UP | SPNG_FILTER_CHOICE_AVG | SPNG_FILTER_CHOICE_PAETH);
 
@@ -4618,20 +4590,12 @@ static int encode_scanline(spng_ctx *ctx, const void *scanline, size_t len)
         memset(ctx->prev_scanline, 0, scanline_width);
     }
 
-    filter = get_best_filter(ctx->prev_scanline, f.bgra8 ? scanline : ctx->scanline,
-                             scanline_width, ctx->bytes_per_pixel, f.filter_choice, f.bgra8);
-
-    if(!filter && !f.bgra8) filtered_scanline = ctx->scanline;
+    filter = get_best_filter(ctx->prev_scanline, scanline, scanline_width, ctx->bytes_per_pixel, f.filter_choice);
 
     filtered_scanline[-1] = filter;
 
-    if(f.bgra8 || filter)
-    {
-        ret = filter_scanline(filtered_scanline, ctx->scanline, ctx->prev_scanline,
-                              f.bgra8 ? scanline : ctx->scanline,
-                              scanline_width, ctx->bytes_per_pixel, filter, f.bgra8);
-        if(ret) return encode_err(ctx, ret);
-    }
+    filter_scanline(filtered_scanline, ctx->scanline, ctx->prev_scanline,
+                    scanline, scanline_width, ctx->bytes_per_pixel, filter);
 
     ret = write_idat_bytes(ctx, filtered_scanline - 1, scanline_width, Z_NO_FLUSH);
     if(ret) return encode_err(ctx, ret);
@@ -4879,7 +4843,6 @@ int spng_encode_image(spng_ctx *ctx, const void *img, size_t len, int fmt, int f
     if(ihdr->interlace_method) encode_flags->interlace = 1;
 
     if(fmt & (SPNG_FMT_PNG | SPNG_FMT_RAW) ) encode_flags->same_layout = 1;
-    if(fmt == SPNG_FMT_RGBA8) encode_flags->bgra8 = 1;
 
     if(ihdr->bit_depth == 16 && fmt != SPNG_FMT_RAW) encode_flags->to_bigendian = 1;
 
