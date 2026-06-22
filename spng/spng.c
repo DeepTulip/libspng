@@ -1541,24 +1541,34 @@ no_opt:
     return 0;
 }
 
-static int filter_scanline(unsigned char *filtered, const unsigned char *prev_scanline, const unsigned char *scanline,
-                           size_t scanline_width, unsigned bytes_per_pixel, const unsigned filter)
+static int filter_scanline(unsigned char *filtered, unsigned char *current_scanline,
+                           const unsigned char *prev_scanline, const unsigned char *scanline,
+                           size_t scanline_width, unsigned bytes_per_pixel,
+                           const unsigned filter, const unsigned source_bgra8)
 {
     if(prev_scanline == NULL || scanline == NULL || scanline_width <= 1) return SPNG_EINTERNAL;
+    if(source_bgra8 && current_scanline == NULL) return SPNG_EINTERNAL;
 
     if(filter > 4) return SPNG_EFILTER;
-    if(filter == 0) return 0;
+    if(filter == 0 && !source_bgra8) return 0;
 
     scanline_width--;
 
     uint32_t i;
     for(i=0; i < scanline_width; i++)
     {
+        unsigned index = i;
         uint8_t x, a, b, c;
+
+        if(source_bgra8)
+        {
+            if((i & 3) == 0) index = i + 2;
+            else if((i & 3) == 2) index = i - 2;
+        }
 
         if(i >= bytes_per_pixel)
         {
-            a = scanline[i - bytes_per_pixel];
+            a = source_bgra8 ? current_scanline[i - bytes_per_pixel] : scanline[i - bytes_per_pixel];
             b = prev_scanline[i];
             c = prev_scanline[i - bytes_per_pixel];
         }
@@ -1569,88 +1579,11 @@ static int filter_scanline(unsigned char *filtered, const unsigned char *prev_sc
             c = 0;
         }
 
-        x = scanline[i];
+        x = scanline[index];
+        if(source_bgra8) current_scanline[i] = x;
 
         switch(filter)
         {
-            case SPNG_FILTER_SUB:
-            {
-                x = x - a;
-                break;
-            }
-            case SPNG_FILTER_UP:
-            {
-                x = x - b;
-                break;
-            }
-            case SPNG_FILTER_AVERAGE:
-            {
-                uint16_t avg = (a + b) / 2;
-                x = x - avg;
-                break;
-            }
-            case SPNG_FILTER_PAETH:
-            {
-                x = x - paeth(a,b,c);
-                break;
-            }
-        }
-
-        filtered[i] = x;
-    }
-
-    return 0;
-}
-
-static unsigned bgra8_index(unsigned i)
-{
-    if((i & 3) == 0) return i + 2;
-    if((i & 3) == 2) return i - 2;
-
-    return i;
-}
-
-static int filter_scanline_bgra8(unsigned char *filtered, unsigned char *current_scanline,
-                                 const unsigned char *prev_scanline, const unsigned char *scanline,
-                                 size_t scanline_width, const unsigned filter)
-{
-    if(filtered == NULL || current_scanline == NULL ||
-       prev_scanline == NULL || scanline == NULL || scanline_width <= 1)
-    {
-        return SPNG_EINTERNAL;
-    }
-
-    if(filter > 4) return SPNG_EFILTER;
-
-    scanline_width--;
-
-    uint32_t i;
-    for(i=0; i < scanline_width; i++)
-    {
-        uint8_t x, a, b, c;
-
-        if(i >= 4)
-        {
-            a = current_scanline[i - 4];
-            b = prev_scanline[i];
-            c = prev_scanline[i - 4];
-        }
-        else
-        {
-            a = 0;
-            b = prev_scanline[i];
-            c = 0;
-        }
-
-        x = scanline[bgra8_index(i)];
-        current_scanline[i] = x;
-
-        switch(filter)
-        {
-            case SPNG_FILTER_NONE:
-            {
-                break;
-            }
             case SPNG_FILTER_SUB:
             {
                 x = x - a;
@@ -1681,7 +1614,8 @@ static int filter_scanline_bgra8(unsigned char *filtered, unsigned char *current
 }
 
 static int32_t filter_sum(const unsigned char *prev_scanline, const unsigned char *scanline,
-                          size_t size, unsigned bytes_per_pixel, const unsigned filter)
+                          size_t size, unsigned bytes_per_pixel,
+                          const unsigned filter, const unsigned source_bgra8)
 {
     /* prevent potential over/underflow, bails out at a width of ~8M pixels for RGBA8 */
     if(size > (INT32_MAX / 128)) return INT32_MAX;
@@ -1692,9 +1626,26 @@ static int32_t filter_sum(const unsigned char *prev_scanline, const unsigned cha
 
     for(i=0; i < size; i++)
     {
+        unsigned index = i;
+        unsigned prev_index = i;
+
+        if(source_bgra8)
+        {
+            if((i & 3) == 0) index = i + 2;
+            else if((i & 3) == 2) index = i - 2;
+
+            if(i >= bytes_per_pixel)
+            {
+                prev_index = i - bytes_per_pixel;
+
+                if((prev_index & 3) == 0) prev_index += 2;
+                else if((prev_index & 3) == 2) prev_index -= 2;
+            }
+        }
+
         if(i >= bytes_per_pixel)
         {
-            a = scanline[i - bytes_per_pixel];
+            a = scanline[source_bgra8 ? prev_index : i - bytes_per_pixel];
             b = prev_scanline[i];
             c = prev_scanline[i - bytes_per_pixel];
         }
@@ -1705,68 +1656,7 @@ static int32_t filter_sum(const unsigned char *prev_scanline, const unsigned cha
             c = 0;
         }
 
-        x = scanline[i];
-
-        switch(filter)
-        {
-            case SPNG_FILTER_NONE:
-            {
-                break;
-            }
-            case SPNG_FILTER_SUB:
-            {
-                x = x - a;
-                break;
-            }
-            case SPNG_FILTER_UP:
-            {
-                x = x - b;
-                break;
-            }
-            case SPNG_FILTER_AVERAGE:
-            {
-                uint16_t avg = (a + b) / 2;
-                x = x - avg;
-                break;
-            }
-            case SPNG_FILTER_PAETH:
-            {
-                x = x - paeth(a,b,c);
-                break;
-            }
-        }
-
-        sum += 128 - abs((int)x - 128);
-    }
-
-    return sum;
-}
-
-static int32_t filter_sum_bgra8(const unsigned char *prev_scanline, const unsigned char *scanline,
-                                size_t size, const unsigned filter)
-{
-    if(size > (INT32_MAX / 128)) return INT32_MAX;
-
-    uint32_t i;
-    int32_t sum = 0;
-    uint8_t x, a, b, c;
-
-    for(i=0; i < size; i++)
-    {
-        if(i >= 4)
-        {
-            a = scanline[bgra8_index(i - 4)];
-            b = prev_scanline[i];
-            c = prev_scanline[i - 4];
-        }
-        else
-        {
-            a = 0;
-            b = prev_scanline[i];
-            c = 0;
-        }
-
-        x = scanline[bgra8_index(i)];
+        x = scanline[index];
 
         switch(filter)
         {
@@ -1804,7 +1694,8 @@ static int32_t filter_sum_bgra8(const unsigned char *prev_scanline, const unsign
 }
 
 static unsigned get_best_filter(const unsigned char *prev_scanline, const unsigned char *scanline,
-                                size_t scanline_width, unsigned bytes_per_pixel, const int choices)
+                                size_t scanline_width, unsigned bytes_per_pixel,
+                                const int choices, const unsigned source_bgra8)
 {
     if(!choices) return SPNG_FILTER_NONE;
 
@@ -1828,47 +1719,8 @@ static unsigned get_best_filter(const unsigned char *prev_scanline, const unsign
     {
         flag = 1 << (i + 3);
 
-        if(choices & flag) sum = filter_sum(prev_scanline, scanline, scanline_width, bytes_per_pixel, i);
-        else continue;
-
-        filter_scores[i] = abs(sum);
-
-        if(filter_scores[i] < best_score)
-        {
-            best_score = filter_scores[i];
-            best_filter = i;
-        }
-    }
-
-    return best_filter;
-}
-
-static unsigned get_best_filter_bgra8(const unsigned char *prev_scanline, const unsigned char *scanline,
-                                      size_t scanline_width, const int choices)
-{
-    if(!choices) return SPNG_FILTER_NONE;
-
-    scanline_width--;
-
-    int i;
-    unsigned int best_filter = 0;
-    enum spng_filter_choice flag;
-    int32_t sum, best_score = INT32_MAX;
-    int32_t filter_scores[5] = { INT32_MAX, INT32_MAX, INT32_MAX, INT32_MAX, INT32_MAX };
-
-    if( !(choices & (choices - 1)) )
-    {
-        for(i=0; i < 5; i++)
-        {
-            if(choices == 1 << (i + 3)) return i;
-        }
-    }
-
-    for(i=0; i < 5; i++)
-    {
-        flag = 1 << (i + 3);
-
-        if(choices & flag) sum = filter_sum_bgra8(prev_scanline, scanline, scanline_width, i);
+        if(choices & flag) sum = filter_sum(prev_scanline, scanline, scanline_width,
+                                            bytes_per_pixel, i, source_bgra8);
         else continue;
 
         filter_scores[i] = abs(sum);
@@ -4766,22 +4618,18 @@ static int encode_scanline(spng_ctx *ctx, const void *scanline, size_t len)
         memset(ctx->prev_scanline, 0, scanline_width);
     }
 
-    if(f.bgra8) filter = get_best_filter_bgra8(ctx->prev_scanline, scanline, scanline_width, f.filter_choice);
-    else filter = get_best_filter(ctx->prev_scanline, ctx->scanline, scanline_width, ctx->bytes_per_pixel, f.filter_choice);
+    filter = get_best_filter(ctx->prev_scanline, f.bgra8 ? scanline : ctx->scanline,
+                             scanline_width, ctx->bytes_per_pixel, f.filter_choice, f.bgra8);
 
     if(!filter && !f.bgra8) filtered_scanline = ctx->scanline;
 
     filtered_scanline[-1] = filter;
 
-    if(f.bgra8)
+    if(f.bgra8 || filter)
     {
-        ret = filter_scanline_bgra8(filtered_scanline, ctx->scanline, ctx->prev_scanline,
-                                    scanline, scanline_width, filter);
-        if(ret) return encode_err(ctx, ret);
-    }
-    else if(filter)
-    {
-        ret = filter_scanline(filtered_scanline, ctx->prev_scanline, ctx->scanline, scanline_width, ctx->bytes_per_pixel, filter);
+        ret = filter_scanline(filtered_scanline, ctx->scanline, ctx->prev_scanline,
+                              f.bgra8 ? scanline : ctx->scanline,
+                              scanline_width, ctx->bytes_per_pixel, filter, f.bgra8);
         if(ret) return encode_err(ctx, ret);
     }
 
