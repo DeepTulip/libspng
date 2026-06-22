@@ -171,6 +171,7 @@ struct encode_flags
     unsigned to_bigendian:   1;
     unsigned progressive:    1;
     unsigned finalize:       1;
+    unsigned bgra8:          1;
 
     enum spng_filter_choice filter_choice;
 };
@@ -1601,6 +1602,84 @@ static int filter_scanline(unsigned char *filtered, const unsigned char *prev_sc
     return 0;
 }
 
+static unsigned bgra8_index(unsigned i)
+{
+    if((i & 3) == 0) return i + 2;
+    if((i & 3) == 2) return i - 2;
+
+    return i;
+}
+
+static int filter_scanline_bgra8(unsigned char *filtered, unsigned char *current_scanline,
+                                 const unsigned char *prev_scanline, const unsigned char *scanline,
+                                 size_t scanline_width, const unsigned filter)
+{
+    if(filtered == NULL || current_scanline == NULL ||
+       prev_scanline == NULL || scanline == NULL || scanline_width <= 1)
+    {
+        return SPNG_EINTERNAL;
+    }
+
+    if(filter > 4) return SPNG_EFILTER;
+
+    scanline_width--;
+
+    uint32_t i;
+    for(i=0; i < scanline_width; i++)
+    {
+        uint8_t x, a, b, c;
+
+        if(i >= 4)
+        {
+            a = current_scanline[i - 4];
+            b = prev_scanline[i];
+            c = prev_scanline[i - 4];
+        }
+        else
+        {
+            a = 0;
+            b = prev_scanline[i];
+            c = 0;
+        }
+
+        x = scanline[bgra8_index(i)];
+        current_scanline[i] = x;
+
+        switch(filter)
+        {
+            case SPNG_FILTER_NONE:
+            {
+                break;
+            }
+            case SPNG_FILTER_SUB:
+            {
+                x = x - a;
+                break;
+            }
+            case SPNG_FILTER_UP:
+            {
+                x = x - b;
+                break;
+            }
+            case SPNG_FILTER_AVERAGE:
+            {
+                uint16_t avg = (a + b) / 2;
+                x = x - avg;
+                break;
+            }
+            case SPNG_FILTER_PAETH:
+            {
+                x = x - paeth(a,b,c);
+                break;
+            }
+        }
+
+        filtered[i] = x;
+    }
+
+    return 0;
+}
+
 static int32_t filter_sum(const unsigned char *prev_scanline, const unsigned char *scanline,
                           size_t size, unsigned bytes_per_pixel, const unsigned filter)
 {
@@ -1663,6 +1742,67 @@ static int32_t filter_sum(const unsigned char *prev_scanline, const unsigned cha
     return sum;
 }
 
+static int32_t filter_sum_bgra8(const unsigned char *prev_scanline, const unsigned char *scanline,
+                                size_t size, const unsigned filter)
+{
+    if(size > (INT32_MAX / 128)) return INT32_MAX;
+
+    uint32_t i;
+    int32_t sum = 0;
+    uint8_t x, a, b, c;
+
+    for(i=0; i < size; i++)
+    {
+        if(i >= 4)
+        {
+            a = scanline[bgra8_index(i - 4)];
+            b = prev_scanline[i];
+            c = prev_scanline[i - 4];
+        }
+        else
+        {
+            a = 0;
+            b = prev_scanline[i];
+            c = 0;
+        }
+
+        x = scanline[bgra8_index(i)];
+
+        switch(filter)
+        {
+            case SPNG_FILTER_NONE:
+            {
+                break;
+            }
+            case SPNG_FILTER_SUB:
+            {
+                x = x - a;
+                break;
+            }
+            case SPNG_FILTER_UP:
+            {
+                x = x - b;
+                break;
+            }
+            case SPNG_FILTER_AVERAGE:
+            {
+                uint16_t avg = (a + b) / 2;
+                x = x - avg;
+                break;
+            }
+            case SPNG_FILTER_PAETH:
+            {
+                x = x - paeth(a,b,c);
+                break;
+            }
+        }
+
+        sum += 128 - abs((int)x - 128);
+    }
+
+    return sum;
+}
+
 static unsigned get_best_filter(const unsigned char *prev_scanline, const unsigned char *scanline,
                                 size_t scanline_width, unsigned bytes_per_pixel, const int choices)
 {
@@ -1689,6 +1829,46 @@ static unsigned get_best_filter(const unsigned char *prev_scanline, const unsign
         flag = 1 << (i + 3);
 
         if(choices & flag) sum = filter_sum(prev_scanline, scanline, scanline_width, bytes_per_pixel, i);
+        else continue;
+
+        filter_scores[i] = abs(sum);
+
+        if(filter_scores[i] < best_score)
+        {
+            best_score = filter_scores[i];
+            best_filter = i;
+        }
+    }
+
+    return best_filter;
+}
+
+static unsigned get_best_filter_bgra8(const unsigned char *prev_scanline, const unsigned char *scanline,
+                                      size_t scanline_width, const int choices)
+{
+    if(!choices) return SPNG_FILTER_NONE;
+
+    scanline_width--;
+
+    int i;
+    unsigned int best_filter = 0;
+    enum spng_filter_choice flag;
+    int32_t sum, best_score = INT32_MAX;
+    int32_t filter_scores[5] = { INT32_MAX, INT32_MAX, INT32_MAX, INT32_MAX, INT32_MAX };
+
+    if( !(choices & (choices - 1)) )
+    {
+        for(i=0; i < 5; i++)
+        {
+            if(choices == 1 << (i + 3)) return i;
+        }
+    }
+
+    for(i=0; i < 5; i++)
+    {
+        flag = 1 << (i + 3);
+
+        if(choices & flag) sum = filter_sum_bgra8(prev_scanline, scanline, scanline_width, i);
         else continue;
 
         filter_scores[i] = abs(sum);
@@ -4573,35 +4753,8 @@ static int encode_scanline(spng_ctx *ctx, const void *scanline, size_t len)
 
     if(len < scanline_width - 1) return SPNG_EINTERNAL;
 
-    if(ctx->fmt == SPNG_FMT_RGBA8)
-    {
-        size_t i;
-
-        if(scanline == ctx->scanline)
-        {
-            for(i=0; i < scanline_width - 1; i += 4)
-            {
-                unsigned char tmp = ctx->scanline[i];
-                ctx->scanline[i] = ctx->scanline[i + 2];
-                ctx->scanline[i + 2] = tmp;
-            }
-        }
-        else
-        {
-            const unsigned char *src = scanline;
-            unsigned char *dst = ctx->scanline;
-
-            for(i=0; i < scanline_width - 1; i += 4)
-            {
-                dst[i] = src[i + 2];
-                dst[i + 1] = src[i + 1];
-                dst[i + 2] = src[i];
-                dst[i + 3] = src[i + 3];
-            }
-        }
-    }
     /* encode_row() interlaces directly to ctx->scanline */
-    else if(scanline != ctx->scanline) memcpy(ctx->scanline, scanline, scanline_width - 1);
+    if(!f.bgra8 && scanline != ctx->scanline) memcpy(ctx->scanline, scanline, scanline_width - 1);
 
     if(f.to_bigendian) u16_row_to_bigendian(ctx->scanline, scanline_width - 1);
     const int requires_previous = f.filter_choice & (SPNG_FILTER_CHOICE_UP | SPNG_FILTER_CHOICE_AVG | SPNG_FILTER_CHOICE_PAETH);
@@ -4613,13 +4766,20 @@ static int encode_scanline(spng_ctx *ctx, const void *scanline, size_t len)
         memset(ctx->prev_scanline, 0, scanline_width);
     }
 
-    filter = get_best_filter(ctx->prev_scanline, ctx->scanline, scanline_width, ctx->bytes_per_pixel, f.filter_choice);
+    if(f.bgra8) filter = get_best_filter_bgra8(ctx->prev_scanline, scanline, scanline_width, f.filter_choice);
+    else filter = get_best_filter(ctx->prev_scanline, ctx->scanline, scanline_width, ctx->bytes_per_pixel, f.filter_choice);
 
-    if(!filter) filtered_scanline = ctx->scanline;
+    if(!filter && !f.bgra8) filtered_scanline = ctx->scanline;
 
     filtered_scanline[-1] = filter;
 
-    if(filter)
+    if(f.bgra8)
+    {
+        ret = filter_scanline_bgra8(filtered_scanline, ctx->scanline, ctx->prev_scanline,
+                                    scanline, scanline_width, filter);
+        if(ret) return encode_err(ctx, ret);
+    }
+    else if(filter)
     {
         ret = filter_scanline(filtered_scanline, ctx->prev_scanline, ctx->scanline, scanline_width, ctx->bytes_per_pixel, filter);
         if(ret) return encode_err(ctx, ret);
@@ -4774,7 +4934,9 @@ int spng_encode_image(spng_ctx *ctx, const void *img, size_t len, int fmt, int f
     struct encode_flags *encode_flags = &ctx->encode_flags;
 
     if(fmt == SPNG_FMT_RGBA8 &&
-       !(ihdr->color_type == SPNG_COLOR_TYPE_TRUECOLOR_ALPHA && ihdr->bit_depth == 8))
+       !(ihdr->color_type == SPNG_COLOR_TYPE_TRUECOLOR_ALPHA &&
+         ihdr->bit_depth == 8 &&
+         ihdr->interlace_method == SPNG_INTERLACE_NONE))
     {
         return SPNG_EFMT;
     }
@@ -4847,7 +5009,7 @@ int spng_encode_image(spng_ctx *ctx, const void *img, size_t len, int fmt, int f
     ctx->scanline = ctx->scanline_buf + 16;
     ctx->prev_scanline = ctx->prev_scanline_buf + 16;
 
-    if(encode_flags->filter_choice)
+    if(encode_flags->filter_choice || fmt == SPNG_FMT_RGBA8)
     {
         ctx->filtered_scanline_buf = spng__malloc(ctx, scanline_buf_size);
         if(ctx->filtered_scanline_buf == NULL) return encode_err(ctx, SPNG_EMEM);
@@ -4869,6 +5031,7 @@ int spng_encode_image(spng_ctx *ctx, const void *img, size_t len, int fmt, int f
     if(ihdr->interlace_method) encode_flags->interlace = 1;
 
     if(fmt & (SPNG_FMT_PNG | SPNG_FMT_RAW) ) encode_flags->same_layout = 1;
+    if(fmt == SPNG_FMT_RGBA8) encode_flags->bgra8 = 1;
 
     if(ihdr->bit_depth == 16 && fmt != SPNG_FMT_RAW) encode_flags->to_bigendian = 1;
 
